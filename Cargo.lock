@@ -3070,7 +3070,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "x-recipe-bench"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "eframe",
  "image",
@@ -3148,7 +3148,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xrp-camera"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "cc",
  "rusb",
@@ -3156,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "xrp-recipes"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "roxmltree",
  "xrp-camera",
