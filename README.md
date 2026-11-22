@@ -18,8 +18,10 @@ Early, and tested narrowly. Read this before relying on it.
   (C1–C7) have been confirmed on that camera.
 - **Other camera bodies:** untested. Slider ranges and film simulations are
   the X-T4's.
-- **Windows and macOS:** never built. The code is written to be portable, but
-  nobody has compiled or run it there.
+- **Windows:** experimental. The program compiles and its automated tests
+  pass on Windows, but nobody has yet run it on a real Windows computer with
+  a camera. See "Windows (experimental)" below. Testers are very welcome.
+- **macOS:** never built.
 - **Wayland:** untested. Remembering window positions and snapping windows
   together need X11 in any case.
 
@@ -36,6 +38,26 @@ chmod +x X-Recipe-Bench-*.AppImage
 ```
 
 It needs glibc 2.35 or newer (Ubuntu 22.04 and later, and similar).
+
+## Windows (experimental)
+
+The [Releases](../../releases) page also has a Windows program
+(`...-windows-x86_64-experimental.exe`). It is built automatically and has
+**not been tried on a real Windows computer**. If you try it, please open an
+issue and say what happened, whether it worked or not.
+
+What to expect:
+
+- **Windows will warn you** ("Windows protected your PC") because the program
+  is not signed. Choose "More info", then "Run anyway", if you trust it.
+- **The camera needs a generic USB driver.** Windows does not let a program
+  like this talk to the camera with the camera's normal driver. The usual way
+  is the free tool [Zadig](https://zadig.akeo.ie): with the camera connected
+  in USB RAW CONV./BACKUP RESTORE mode, select it in Zadig and install the
+  **WinUSB** driver. While that driver is installed, Fujifilm's own software
+  will not see the camera; uninstall the driver in Device Manager to go back.
+- **Not yet done on Windows:** windows snapping together, opening on the
+  monitor under the mouse, and the "Free the camera" button.
 
 ## Connecting the camera
 
