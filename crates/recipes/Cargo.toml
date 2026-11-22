@@ -1,0 +1,9 @@
+[package]
+name = "xrp-recipes"
+description = "Recipe files (.FP1), the recipes folder, categories, and applying a recipe to a camera profile."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xrp-camera = { path = "../camera" }
+roxmltree = "0.20"

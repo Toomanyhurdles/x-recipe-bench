@@ -1,0 +1,11 @@
+[package]
+name = "xrp-camera"
+description = "Talks to a Fujifilm camera over USB (PTP) and has it develop RAF files."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusb = { version = "0.9", features = ["vendored"] }
+
+[build-dependencies]
+cc = "1"

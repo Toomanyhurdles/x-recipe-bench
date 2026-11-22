@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=X Recipe Bench
+Comment=Develop Fujifilm RAF files through the camera's own engine
+Exec=x-recipe-bench %f
+Icon=x-recipe-bench
+Terminal=false
+Categories=Graphics;Photography;
+MimeType=image/x-fuji-raf;
+StartupWMClass=x-recipe-bench

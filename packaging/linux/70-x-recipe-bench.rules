@@ -1,0 +1,4 @@
+# Lets the logged-in user talk to Fujifilm cameras over USB.
+# Only needed if X Recipe Bench reports "permission denied".
+# Install: sudo cp 70-x-recipe-bench.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+SUBSYSTEM=="usb", ATTR{idVendor}=="04cb", TAG+="uaccess"

@@ -1,0 +1,45 @@
+# Runs the tests and builds the Linux AppImage.
+# - Every push and pull request: test, build, and keep the AppImage as a
+#   downloadable artifact of the run.
+# - A tag like v0.18.1: also attach the AppImage to a GitHub Release.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # An older Ubuntu on purpose: the AppImage then runs on systems with
+    # glibc 2.35 or newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace
+      - name: Get appimagetool
+        run: |
+          curl -sSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+      - name: Build the AppImage
+        run: APPIMAGETOOL="$PWD/appimagetool" packaging/appimage/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: X-Recipe-Bench-AppImage
+          path: dist/*.AppImage
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.AppImage
