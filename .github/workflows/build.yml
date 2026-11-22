@@ -1,7 +1,7 @@
-# Runs the tests and builds the Linux AppImage.
+# Runs the tests and builds the Linux AppImage and the Windows program.
 # - Every push and pull request: test, build, and keep the AppImage as a
-#   downloadable artifact of the run.
-# - A tag like v0.18.1: also attach the AppImage to a GitHub Release.
+#   downloadable artifact of the run. The same for the Windows .exe.
+# - A tag like v0.18.1: also attach both to a GitHub Release.
 name: build
 
 on:
@@ -43,3 +43,31 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.AppImage
+
+  windows:
+    # Experimental: this build is compiled and its tests are run, but the
+    # program itself has not been tried on a real Windows computer.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace
+      - name: Build
+        run: cargo build --release -p x-recipe-bench
+      - name: Name the program after its version
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          mkdir -p dist
+          cp target/release/x-recipe-bench.exe "dist/X-Recipe-Bench-$VERSION-windows-x86_64-experimental.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: X-Recipe-Bench-Windows
+          path: dist/*.exe
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
