@@ -18,6 +18,11 @@ use std::sync::mpsc::Receiver;
 
 pub struct App {
     state: AppState,
+    /// Who draws the title bar (craft-window): the app, with these caption
+    /// buttons, or the desktop.
+    frame: craft_window::policy::Frame,
+    /// The "Use the system title bar" setting, as it will be at the next start.
+    system_title_bar: bool,
     /// The About window is open.
     about_open: bool,
     /// The app's icon, loaded once for drawing.
@@ -47,14 +52,22 @@ pub struct App {
     /// Where the main window is, as the system last reported.
     main_place: Option<Place>,
     events: Receiver<AppEvent>,
-    /// The settings as last written to disk, to avoid rewriting them unchanged.
-    saved: String,
+    /// The settings file (craft-settings); writes only when something changed.
+    store: crate::settings::Store,
     last_save_check: std::time::Instant,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings = Settings::load();
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        store: crate::settings::Store,
+        load_notes: Vec<String>,
+        frame: craft_window::policy::Frame,
+    ) -> Self {
+        let settings = store.get().clone();
+        // craft-ui's font stack: egui's faces first, then the fonts installed
+        // on the computer for any character they lack (arrows, stars, other scripts).
+        craft_ui::fonts::UiFonts::new(&craft_ui::fonts::I18nScripts).install(&cc.egui_ctx);
         crate::theme::apply(&cc.egui_ctx, settings.appearance, settings.dark_mode);
         let (tx, rx) = std::sync::mpsc::channel();
         let sender = EventSender::new(tx, cc.egui_ctx.clone());
@@ -118,8 +131,15 @@ impl App {
             camera_tx: camera_worker::spawn(sender.clone()),
             image_tx: image_worker::spawn(sender.clone()),
             events: sender,
+            dialogs: {
+                let ctx = cc.egui_ctx.clone();
+                craft_dialogs::Dialogs::new(std::sync::Arc::new(move || ctx.request_repaint()))
+            },
         };
         state.log(format!("{} {}", crate::APP_NAME, env!("CARGO_PKG_VERSION")));
+        for line in load_notes {
+            state.log(line);
+        }
         match &state.recipes.library {
             Ok(library) => {
                 let line = format!(
@@ -165,6 +185,8 @@ impl App {
             icon_texture: None,
             icon: crate::icon(),
             // The app always opens with the Photos panel docked.
+            frame,
+            system_title_bar: settings.system_title_bar,
             photos_undocked: false,
             photos_place: settings.photos_place,
             photos_opened_at: None,
@@ -177,7 +199,7 @@ impl App {
             minimised: false,
             main_place: None,
             events: rx,
-            saved: String::new(),
+            store,
             last_save_check: std::time::Instant::now(),
         }
     }
@@ -344,13 +366,21 @@ impl App {
     /// The main window's title bar: logo and name, menus, the workspace
     /// tabs, and the window buttons.
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        // The bar's empty space moves the window; double-click maximises.
-        if let Some(pressed) = chrome::drag_area(ui, "title_bar") {
-            self.window_button = Some(pressed);
+        let captions = chrome::captions(&self.frame).cloned();
+        // The bar's empty space moves the window, as a title bar does.
+        if captions.is_some() {
+            chrome::drag_area(ui);
         }
         let logo = self.logo(ui.ctx());
         let bar_centre = ui.max_rect().center().x;
+        let maximised = self.restore_place.is_some() || ui.input(|i| i.viewport().maximized).unwrap_or(false);
         egui::MenuBar::new().ui(ui, |ui| {
+            // Some desktops put the window buttons on the left.
+            if let Some(captions) = captions.as_ref().filter(|c| !c.layout.left.is_empty()) {
+                if let Some(pressed) = ui.scope(|ui| chrome::window_buttons(ui, &captions.layout.left, maximised)).inner {
+                    self.window_button = Some(pressed);
+                }
+            }
             ui.add_space(4.0);
             ui.menu_button("File", |ui| {
                 if ui.button("Open folder…").clicked() {
@@ -419,12 +449,11 @@ impl App {
             chrome::brand(ui, &logo);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.scope(|ui| {
-                    let maximised = self.restore_place.is_some() || ui.input(|i| i.viewport().maximized).unwrap_or(false);
-                    if let Some(pressed) = chrome::window_buttons(ui, true, maximised) {
+                if let Some(captions) = captions.as_ref().filter(|c| !c.layout.right.is_empty()) {
+                    if let Some(pressed) = ui.scope(|ui| chrome::window_buttons(ui, &captions.layout.right, maximised)).inner {
                         self.window_button = Some(pressed);
                     }
-                });
+                }
                 ui.add_space(6.0);
                 if ui.button("Settings").on_hover_text("Appearance and behaviour.").clicked() {
                     self.state.settings_open = !self.state.settings_open;
@@ -481,7 +510,7 @@ impl App {
             });
             ui.separator();
             section(ui, 0.50, &mut |ui| {
-                egui::ScrollArea::vertical().id_salt("camera_scroll").auto_shrink(false).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("settings_scroll").id_salt("camera_scroll").auto_shrink(false).show(ui, |ui| {
                     dock::heading(ui, Panel::Camera);
                     dock::show_panel(Panel::Camera, ui, state);
                     ui.add_space(6.0);
@@ -523,8 +552,9 @@ impl App {
                 .with_title(format!("Photos – {}", crate::APP_NAME))
                 .with_app_id(crate::APP_ID)
                 .with_icon(self.icon.clone())
-                // The app draws the title bar, with a close button only.
-                .with_decorations(false)
+                // Like the main window: the app's title bar (with a close
+                // button only) or the desktop's.
+                .with_decorations(!self.frame_is_app_drawn())
                 .with_inner_size([PHOTOS_WINDOW.0, PHOTOS_WINDOW.1]);
             // Reopen where it last was. The place is fixed when the window
             // opens and then left alone: if the description given to the
@@ -535,17 +565,23 @@ impl App {
                 builder = builder.with_position([place.x, place.y]).with_inner_size([place.width, place.height]);
             }
             let logo = self.logo(ctx);
+            let app_drawn = self.frame_is_app_drawn();
             let state = &mut self.state;
             let mut dock = false;
             ctx.show_viewport_immediate(id, builder, |ui, _class| {
                 egui::Panel::top("photos_window_bar").show(ui, |ui| {
-                    let _ = chrome::drag_area(ui, "photos_title_bar");
+                    if app_drawn {
+                        chrome::drag_area(ui);
+                    }
                     ui.horizontal(|ui| {
                         let size = egui::TextStyle::Body.resolve(ui.style()).size;
                         ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::Vec2::splat(size * 1.3)));
                         ui.strong("Photos");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.scope(|ui| chrome::window_buttons(ui, false, false)).inner == Some(chrome::Pressed::Close) {
+                            if app_drawn
+                                && ui.scope(|ui| chrome::window_buttons(ui, &[craft_window::Button::Close], false)).inner
+                                    == Some(chrome::Pressed::Close)
+                            {
                                 dock = true;
                             }
                             ui.add_space(6.0);
@@ -558,8 +594,10 @@ impl App {
                 });
                 // Closing the window docks the panel again.
                 dock |= ui.input(|i| i.viewport().close_requested());
-                chrome::resize_edges(ui.ctx());
-                chrome::outline(ui.ctx());
+                if app_drawn {
+                    chrome::resize_edges(ui.ctx());
+                    chrome::outline(ui.ctx());
+                }
             });
             if dock {
                 self.photos_undocked = false;
@@ -607,6 +645,11 @@ impl App {
                 ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied(size, picture.as_raw()), TextureOptions::LINEAR)
             })
             .clone()
+    }
+
+    /// The app draws the title bar (rather than the desktop).
+    fn frame_is_app_drawn(&self) -> bool {
+        chrome::captions(&self.frame).is_some()
     }
 
     /// Carries out a press of one of the main window's title-bar buttons,
@@ -768,7 +811,7 @@ impl App {
                 continue;
             }
             loaded += 1;
-            let picture = std::fs::read(crate::samples::picture(&folder, &file)).ok().and_then(|b| image::load_from_memory(&b).ok());
+            let picture = std::fs::read(crate::samples::picture(&folder, &file)).ok().and_then(|b| crate::jpeg::decode(&b).ok());
             match picture {
                 Some(picture) => {
                     let rgb = picture.to_rgb8();
@@ -986,6 +1029,8 @@ impl App {
                 ui.checkbox(&mut state.connect_on_start, "Connect to the camera when the app starts");
                 ui.checkbox(&mut state.develop_on_select, "Develop a photo as soon as it is selected");
                 ui.checkbox(&mut state.editor.auto_render, "Auto-render: develop again shortly after each change in the Editor");
+                ui.checkbox(&mut self.system_title_bar, "Use the system title bar")
+                    .on_hover_text("Let the desktop draw the window's title bar and buttons instead of the app. Takes effect the next time the app starts.");
                 ui.add_space(8.0);
                 ui.separator();
 
@@ -1246,11 +1291,7 @@ impl App {
     fn save_if_changed(&mut self) {
         self.last_save_check = std::time::Instant::now();
         let settings = self.settings();
-        let text = settings.to_text();
-        if text != self.saved {
-            settings.save();
-            self.saved = text;
-        }
+        self.store.save(settings);
     }
 
     fn settings(&self) -> Settings {
@@ -1281,13 +1322,15 @@ impl App {
             auto_render: self.state.editor.auto_render,
             appearance: self.state.appearance,
             dark_mode: self.state.dark_mode,
+            system_title_bar: self.system_title_bar,
         }
     }
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.state.collect_dialog_answers();
         self.handle_events(&ctx);
         self.keyboard(&ctx);
         self.dropped_files(&ctx);
@@ -1298,8 +1341,10 @@ impl eframe::App for App {
         self.photos_window(&ctx);
         self.open_large(&ctx);
         self.window_buttons(&ctx);
-        chrome::resize_edges(&ctx);
-        chrome::outline(&ctx);
+        if self.frame_is_app_drawn() {
+            chrome::resize_edges(&ctx);
+            chrome::outline(&ctx);
+        }
         self.settings_window(&ctx);
         self.batch_window(&ctx);
         self.make_samples(&ctx);
@@ -1316,6 +1361,8 @@ impl eframe::App for App {
             self.save_if_changed();
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        // File dialogs asked for during this frame open now, over the main window.
+        self.state.dialogs.show_pending(Some(&*frame));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

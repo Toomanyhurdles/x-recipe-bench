@@ -27,6 +27,8 @@ mod dock;
 mod events;
 mod export;
 mod image_worker;
+mod jpeg;
+mod resize;
 mod orientation;
 mod panels;
 mod paths;
@@ -57,21 +59,37 @@ pub fn icon() -> std::sync::Arc<eframe::egui::IconData> {
     std::sync::Arc::new(data)
 }
 
+/// Who draws the title bar, decided once at startup by craft-window from the
+/// system and the "Use the system title bar" setting. `XRB_TITLEBAR=app` or
+/// `=system` overrides both.
+pub fn title_bar(system: bool) -> craft_window::policy::Frame {
+    use craft_window::policy::{decide_for, Backend, TitleBarPref};
+    let pref = if system { TitleBarPref::System } else { TitleBarPref::Integrated };
+    let frame = decide_for(craft_window::Prefix::new("XRB"), Backend::from_env(), pref).frame;
+    match frame {
+        // macOS keeps its own traffic lights; this app draws no inset bar.
+        craft_window::policy::Frame::Inset(_) => craft_window::policy::Frame::Native,
+        other => other,
+    }
+}
+
 fn main() -> eframe::Result {
+    let (store, notes) = settings::Store::open();
+    let frame = title_bar(store.get().system_title_bar);
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title(APP_NAME)
+        .with_app_id(APP_ID)
+        .with_icon(icon())
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([640.0, 400.0]);
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(APP_NAME)
-            .with_app_id(APP_ID)
-            .with_icon(icon())
-            // The app draws its own title bar (see chrome.rs).
-            .with_decorations(false)
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([640.0, 400.0]),
+        // Decorations on or off, as decided above (see chrome.rs for the app's own bar).
+        viewport: craft_window::policy::apply(viewport, &frame),
         ..Default::default()
     };
     eframe::run_native(
         APP_NAME,
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, store, notes, frame)))),
     )
 }

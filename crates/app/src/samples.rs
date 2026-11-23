@@ -58,7 +58,7 @@ impl Index {
         let dir = folder(recipes_folder);
         if std::fs::create_dir_all(&dir).is_ok() {
             if let Ok(text) = serde_json::to_string_pretty(self) {
-                let _ = std::fs::write(dir.join("index.json"), text);
+                let _ = craft_atomic::atomic_write(&dir.join("index.json"), text.as_bytes());
             }
         }
     }

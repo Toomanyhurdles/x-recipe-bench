@@ -34,16 +34,12 @@ pub fn spawn(events: EventSender) -> Sender<ImageRequest> {
 
 fn load(raf: &Path, max_side: u32) -> Option<ColorImage> {
     let jpeg = xrp_camera::raf::read_embedded_jpeg(raf).ok()??;
-    let img = image::load_from_memory(&jpeg).ok()?;
+    // The fast reduced decode is enough when only a thumbnail is wanted.
+    let img = crate::jpeg::decode_at_least(&jpeg, max_side).ok()?;
     // Photos taken with the camera turned are stored sideways with a note
     // saying so; turn them upright here.
     let recorded = xrp_camera::exif::parse_jpeg(&jpeg).map(|e| e.orientation).unwrap_or(1);
     let img = crate::orientation::Orientation::from_exif(recorded).apply(img);
-    let img = if img.width().max(img.height()) > max_side {
-        img.thumbnail(max_side, max_side)
-    } else {
-        img
-    };
-    let rgb = img.to_rgb8();
+    let rgb = crate::resize::fit(&img.to_rgb8(), max_side, crate::resize::Quality::Fast);
     Some(ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw()))
 }

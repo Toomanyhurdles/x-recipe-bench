@@ -73,7 +73,7 @@ impl Finish {
             return Ok(jpeg);
         }
         let recorded = xrp_camera::exif::parse_jpeg(&jpeg).map(|e| e.orientation).unwrap_or(1);
-        let image = image::load_from_memory(&jpeg)
+        let image = crate::jpeg::decode(&jpeg)
             .map_err(|e| Error::Other(format!("Could not read the developed image: {e}")))?;
         let mut image = self.orientation.apply(Orientation::from_exif(recorded).apply(image)).to_rgb8();
         if let Some(crop) = crop {
@@ -86,15 +86,12 @@ impl Finish {
             if w.max(h) > long {
                 let scale = long as f32 / w.max(h) as f32;
                 let (nw, nh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
-                image = image::imageops::resize(&image, nw, nh, image::imageops::FilterType::Lanczos3);
+                image = crate::resize::resize(&image, nw, nh, crate::resize::Quality::Best);
             }
         }
         let image = self.border.add(image);
-        let mut out = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, self.options.quality.clamp(1, 100))
-            .encode_image(&image)
-            .map_err(|e| Error::Other(format!("Could not save the finished image: {e}")))?;
-        Ok(xrp_camera::exif::carry_over_upright(&jpeg, &out))
+        crate::jpeg::encode(&image, self.options.quality, Some(&jpeg))
+            .map_err(|e| Error::Other(format!("Could not save the finished image: {e}")))
     }
 }
 
@@ -117,9 +114,8 @@ mod tests {
 
     #[test]
     fn resizing_shrinks_to_the_long_edge_and_never_enlarges() {
-        let mut picture = Vec::new();
         let img = image::RgbImage::from_pixel(400, 200, image::Rgb([90, 120, 150]));
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut picture, 95).encode_image(&img).unwrap();
+        let picture = crate::jpeg::encode(&img, 95, None).unwrap();
         let finish = |long_edge: u32, border: Border| Finish {
             orientation: Orientation::default(),
             crop: None,
@@ -127,7 +123,7 @@ mod tests {
             options: ExportOptions { resize: true, long_edge, ..Default::default() },
         };
         let size = |bytes: Vec<u8>| {
-            let i = image::load_from_memory(&bytes).unwrap();
+            let i = crate::jpeg::decode(&bytes).unwrap();
             (i.width(), i.height())
         };
         assert_eq!(size(finish(100, Border::default()).apply(picture.clone()).unwrap()), (100, 50));

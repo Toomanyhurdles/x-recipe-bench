@@ -475,10 +475,9 @@ fn fingerprint(folder: &Path) -> u64 {
 }
 
 fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
-    let tmp = path.with_extension("tmp-xrp");
-    std::fs::write(&tmp, text)
-        .and_then(|_| std::fs::rename(&tmp, path))
-        .map_err(|e| format!("Could not write {}: {e}", path.display()))
+    // craft-atomic: written beside the file, synced, then swapped in, so a
+    // crash or full disk never leaves half a recipe.
+    craft_atomic::atomic_write(path, text.as_bytes()).map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
 pub fn parse_categories(text: &str) -> Vec<Category> {

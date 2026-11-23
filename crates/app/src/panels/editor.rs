@@ -55,7 +55,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     header(ui, state, &mut action);
     ui.separator();
 
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("editor_scroll").auto_shrink(false).show(ui, |ui| {
         changed = controls(ui, &mut state.editor.settings);
         border_controls(ui, &mut state.border);
         if let Some(text) = &state.editor.message {

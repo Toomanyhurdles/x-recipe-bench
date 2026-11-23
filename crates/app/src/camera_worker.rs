@@ -190,7 +190,7 @@ impl Worker {
                     let key = key(&raf, &recipe);
                     let result = self.develop(&raf, recipe.as_ref(), RenderSize::Full).and_then(|(bytes, notes)| {
                         let bytes = finish.apply(bytes)?;
-                        std::fs::write(&dest, &bytes)
+                        craft_atomic::atomic_write(&dest, &bytes)
                             .map_err(|e| Error::Other(format!("Could not save {}: {e}", dest.display())))?;
                         Ok(notes)
                     });
@@ -455,24 +455,22 @@ impl Worker {
 /// small, as a recipe's sample.
 fn save_sample(jpeg: &[u8], orientation: Orientation, dest: &Path) -> Result<(), Error> {
     let recorded = xrp_camera::exif::parse_jpeg(jpeg).map(|e| e.orientation).unwrap_or(1);
-    let image = image::load_from_memory(jpeg)
+    let image = crate::jpeg::decode_at_least(jpeg, crate::samples::SAMPLE_SIZE)
         .map_err(|e| Error::Other(format!("Could not read the developed image: {e}")))?;
     let image = orientation.apply(Orientation::from_exif(recorded).apply(image));
     let size = crate::samples::SAMPLE_SIZE;
-    let small = image.thumbnail(size, size).to_rgb8();
-    let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88)
-        .encode_image(&small)
+    let small = crate::resize::fit(&image.to_rgb8(), size, crate::resize::Quality::Fast);
+    let out = crate::jpeg::encode(&small, 88, None)
         .map_err(|e| Error::Other(format!("Could not save the sample picture: {e}")))?;
     if let Some(dir) = dest.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(dest, out).map_err(|e| Error::Other(format!("Could not save {}: {e}", dest.display())))
+    craft_atomic::atomic_write(dest, &out).map_err(|e| Error::Other(format!("Could not save {}: {e}", dest.display())))
 }
 
 fn decode(jpeg: &[u8]) -> Result<ColorImage, Error> {
     let recorded = xrp_camera::exif::parse_jpeg(jpeg).map(|e| e.orientation).unwrap_or(1);
-    let img = image::load_from_memory(jpeg)
+    let img = crate::jpeg::decode(jpeg)
         .map_err(|e| Error::Other(format!("Could not read the developed image: {e}")))?;
     let img = Orientation::from_exif(recorded).apply(img).to_rgb8();
     Ok(ColorImage::from_rgb([img.width() as usize, img.height() as usize], img.as_raw()))
@@ -494,8 +492,7 @@ mod tests {
         for (x, _, p) in img.enumerate_pixels_mut() {
             *p = image::Rgb(if x < 2 { [10, 10, 10] } else { [240, 240, 240] });
         }
-        let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100).encode_image(&img).unwrap();
+        let jpeg = crate::jpeg::encode(&img, 100, None).unwrap();
         xrp_camera::exif::carry_over_upright(&xrp_camera::exif::test_jpeg(orientation, &[]), &jpeg)
             .into_iter()
             .collect::<Vec<u8>>()
@@ -505,13 +502,12 @@ mod tests {
     fn a_sample_picture_is_saved_small_and_upright() {
         // A 1200×800 picture recorded as "turn 90° to view".
         let img = image::RgbImage::from_pixel(1200, 800, image::Rgb([120, 90, 60]));
-        let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90).encode_image(&img).unwrap();
+        let jpeg = crate::jpeg::encode(&img, 90, None).unwrap();
         let jpeg = xrp_camera::exif::carry_over_upright(&xrp_camera::exif::test_jpeg(1, &[]), &jpeg);
         let dir = std::env::temp_dir().join(format!("xrb-sample-test-{}", std::process::id()));
         let dest = dir.join("Samples").join("Campfire.FP1.jpg");
         save_sample(&jpeg, Orientation::default().rotated_cw(), &dest).unwrap();
-        let saved = image::open(&dest).unwrap();
+        let saved = crate::jpeg::decode(&std::fs::read(&dest).unwrap()).unwrap();
         assert_eq!((saved.width(), saved.height()), (347, 520));
         assert!(save_sample(b"not a picture", Orientation::default(), &dest).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -566,7 +562,7 @@ mod tests {
     #[test]
     fn a_turned_export_has_turned_pixels_and_keeps_the_details() {
         let out = finish(Orientation::default().rotated_cw(), Border::default()).apply(photo(1)).unwrap();
-        let image = image::load_from_memory(&out).unwrap().to_rgb8();
+        let image = crate::jpeg::decode(&out).unwrap().to_rgb8();
         assert_eq!(image.dimensions(), (2, 4), "a quarter turn swaps width and height");
         // The dark left half is now the top half.
         assert!(image.get_pixel(0, 0)[0] < 60 && image.get_pixel(1, 3)[0] > 190);
@@ -576,13 +572,13 @@ mod tests {
         // A 50% border on a 4×2 picture adds 1 pixel all round, in white.
         let framed =
             finish(Orientation::default(), Border { on: true, percent: 50.0, ..Default::default() }).apply(photo(1)).unwrap();
-        let image = image::load_from_memory(&framed).unwrap().to_rgb8();
+        let image = crate::jpeg::decode(&framed).unwrap().to_rgb8();
         assert_eq!((image.width(), image.height()), (6, 4));
         assert!(image.get_pixel(0, 0)[0] > 240 && image.get_pixel(1, 1)[0] < 60 && image.get_pixel(5, 3)[0] > 240);
         assert_eq!(xrp_camera::exif::parse_jpeg(&framed).unwrap().model, "X-T4");
 
         let mirrored = finish(Orientation::default().flipped_horizontally(), Border::default()).apply(photo(1)).unwrap();
-        let image = image::load_from_memory(&mirrored).unwrap().to_rgb8();
+        let image = crate::jpeg::decode(&mirrored).unwrap().to_rgb8();
         assert!(image.get_pixel(0, 0)[0] > 190 && image.get_pixel(3, 0)[0] < 60);
     }
 }

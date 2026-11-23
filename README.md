@@ -21,6 +21,10 @@ Early, and tested narrowly. Read this before relying on it.
 - **Windows:** experimental. The program compiles and its automated tests
   pass on Windows, but nobody has yet run it on a real Windows computer with
   a camera. See "Windows (experimental)" below. Testers are very welcome.
+- **Version 0.19:** moved onto the craft-libs shared libraries (see below).
+  The camera code is unchanged, but photo reading, JPEG handling, settings,
+  dialogs and the title bar are new underneath and have only been tried on a
+  test computer without a camera so far.
 - **macOS:** never built.
 - **Wayland:** untested. Remembering window positions and snapping windows
   together need X11 in any case.
@@ -158,6 +162,35 @@ develop real pictures. A stand-in RAF for testing can be made from any JPEG:
 cargo run -p xrp-camera --example make_sample_raf -- in.jpg out.RAF
 ```
 
+## Shared libraries: craft-libs
+
+From version 0.19 the app is built on
+[craft-libs](https://github.com/storytold/craft-libs), the ArtCraft team's
+collection of Rust libraries, wherever one does the job. They replace code
+that used to be written here:
+
+| craft-libs crate | What it does in X Recipe Bench |
+|---|---|
+| craft-raw | recognises RAF files and finds their preview picture |
+| craft-metadata, craft-tiff | read a photo's details (EXIF) and Fujifilm's settings block |
+| craft-jpeg | reads and writes every JPEG |
+| craft-develop | resizes pictures (exports, thumbnails, samples) |
+| craft-xml | reads `.FP1` recipe files |
+| craft-atomic | saves recipes, notes, exports and samples without ever leaving half a file |
+| craft-settings | the settings file (`config.toml`), with backups and recovery |
+| craft-dialogs | the open, folder and save dialogs |
+| craft-ui | the font stack (falls back to installed fonts for any missing symbol) and widget colours |
+| craft-window | who draws the title bar, how dragging it behaves, where its buttons go |
+
+They are not on crates.io, so `Cargo.toml` takes them from Git at one exact
+commit. craft-ui needs craft-libs' own copy of egui 0.37 and winit, which the
+`[patch.crates-io]` section at the end of `Cargo.toml` selects. To move to a
+newer craft-libs, change the commit in both places (keep egui's in step with
+craft-libs' own `Cargo.toml`), run `cargo update`, the tests, and try the app.
+
+What craft-libs has no equivalent for stays here: everything that talks to
+the camera, the recipe model, window snapping, and the screen itself.
+
 ## Layout of the code
 
 ```
@@ -167,8 +200,8 @@ crates/camera/         talks to the camera; no user interface
   src/camera.rs        connect, upload a RAF, develop it
   src/profile.rs       the settings block the camera develops with
   src/slots.rs         the camera's custom slots: read and write
-  src/exif.rs          reads the details a camera writes into a photo
-  src/raf.rs           reads the header and embedded preview of a RAF file
+  src/exif.rs          the details a camera writes into a photo (via craft-metadata)
+  src/raf.rs           recognises a RAF and reads its preview (via craft-raw)
   src/busy.rs          finds which other program is holding the camera
   src/sim.rs           a simulated camera, for tests and for trying the app
   tests/               the real protocol code run against the simulated camera
@@ -188,6 +221,8 @@ crates/app/            the window
   src/state.rs         the data all panels share
   src/camera_worker.rs background thread that owns the camera
   src/image_worker.rs  background thread that decodes pictures
+  src/jpeg.rs          JPEG reading and writing (via craft-jpeg)
+  src/resize.rs        making pictures smaller (via craft-develop)
   src/photo.rs         stars, crop, the per-folder notes file, filter and sort
   src/export.rs        how exported JPEGs are finished and named
   src/border.rs        the border around a photo
@@ -195,10 +230,10 @@ crates/app/            the window
   src/samples.rs       recipe sample pictures
   src/slots.rs         what the app knows about the camera's custom slots
   src/theme.rs         dark and light modes and the five appearances
-  src/chrome.rs        the app-drawn title bar, window buttons and edges
+  src/chrome.rs        the app-drawn title bar, window buttons and edges (with craft-window)
   src/windows.rs       window positions, snapping, and the maximise area
   src/pointer.rs       asks the system about the mouse and the monitors
-  src/settings.rs      what is remembered between runs
+  src/settings.rs      what is remembered between runs (via craft-settings)
   src/paths.rs         where the recipes folder is
 packaging/             AppImage build script, desktop entry, udev rule
 ```
@@ -214,6 +249,10 @@ Every source file starts with a plain-language note on what it is for.
   libfuji project (MIT).
 - Fujifilm property and operation names: the libgphoto2 project's public
   header.
+- Shared libraries: [craft-libs](https://github.com/storytold/craft-libs) by
+  the ArtCraft Team and contributors, used under the MIT licence
+  (`licenses/craft-libs-LICENSE-MIT.txt`), and its copy of
+  [egui](https://github.com/emilk/egui) (MIT OR Apache-2.0).
 - Inspired by [grawji](https://github.com/p5k369/grawji). No code from grawji
   or rawji is used.
 

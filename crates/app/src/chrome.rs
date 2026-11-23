@@ -2,9 +2,12 @@
 //! instead: the title bar with the logo and name, the minimise / maximise /
 //! close buttons, the edges that resize, and the outline.
 //!
-//! The app's windows are created without the system's frame so the title
-//! can carry the logo and follow the chosen appearance, and so panel
-//! windows can be given only a close button.
+//! Whether the app draws these at all is decided by craft-window (see
+//! `title_bar` in main.rs): by default it does, so the title can carry the
+//! logo and follow the chosen appearance; with "Use the system title bar"
+//! the desktop draws them. craft-window also says which end of the bar the
+//! buttons go at on this desktop, and makes the bar's empty space move the
+//! window the way the system's own title bar does.
 
 use eframe::egui::{self, Color32, CursorIcon, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -42,37 +45,39 @@ pub fn brand_width(ui: &Ui) -> f32 {
     2.0 + size * 1.5 + text("X") + text("Recipe Bench") + 4.0 * 3.0
 }
 
-/// Makes the bar's empty space behave like a title bar: drag it to move the
-/// window, double-click it for `Pressed::Maximise`. Call this before adding
-/// the bar's own buttons, so that they stay clickable on top of it.
-pub fn drag_area(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug) -> Option<Pressed> {
-    let response = ui.interact(ui.max_rect(), ui.id().with(id), Sense::click_and_drag());
-    if response.double_clicked() {
-        return Some(Pressed::Maximise);
+/// The caption buttons to draw, or `None` when the desktop draws the title bar.
+pub fn captions(frame: &craft_window::policy::Frame) -> Option<&craft_window::policy::Captions> {
+    match frame {
+        craft_window::policy::Frame::Integrated(captions) => Some(captions),
+        _ => None,
     }
-    // (Dragging a maximised window by its bar un-maximises it; the system does that.)
-    if response.drag_started_by(egui::PointerButton::Primary) {
-        // From here the system moves the window with the mouse.
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
-    None
 }
 
-/// The buttons at the right end of a title bar. Call inside a
-/// right-to-left layout. Panel windows get the close button only.
-pub fn window_buttons(ui: &mut Ui, minimise_and_maximise: bool, maximised: bool) -> Option<Pressed> {
+/// Makes the bar's empty space behave like a title bar (craft-window): drag
+/// it to move the window; a double-click does what the system's setting says
+/// (usually maximise). Call this before adding the bar's own controls, so
+/// they stay clickable on top of it.
+pub fn drag_area(ui: &mut Ui) {
+    let rect = ui.max_rect();
+    craft_window::title_bar::empty_area(ui, rect);
+}
+
+/// Window buttons, in the order the desktop lists them for one end of the
+/// bar (outermost last). Call inside a right-to-left layout for the right
+/// end, a left-to-right one for the left end: either way the outermost
+/// button is drawn first.
+pub fn window_buttons(ui: &mut Ui, buttons: &[craft_window::Button], maximised: bool) -> Option<Pressed> {
     let mut pressed = None;
     ui.spacing_mut().item_spacing.x = 0.0;
-    if button(ui, Pressed::Close, false, "Close") {
-        pressed = Some(Pressed::Close);
-    }
-    if minimise_and_maximise {
-        let hint = if maximised { "Restore the previous size" } else { "Maximise (leaves room for separate panel windows)" };
-        if button(ui, Pressed::Maximise, maximised, hint) {
-            pressed = Some(Pressed::Maximise);
-        }
-        if button(ui, Pressed::Minimise, false, "Minimise the app and its panel windows") {
-            pressed = Some(Pressed::Minimise);
+    for b in buttons.iter().rev() {
+        let (kind, hint) = match b {
+            craft_window::Button::Close => (Pressed::Close, "Close"),
+            craft_window::Button::Maximize if maximised => (Pressed::Maximise, "Restore the previous size"),
+            craft_window::Button::Maximize => (Pressed::Maximise, "Maximise (leaves room for separate panel windows)"),
+            craft_window::Button::Minimize => (Pressed::Minimise, "Minimise the app and its panel windows"),
+        };
+        if button(ui, kind, maximised, hint) {
+            pressed = Some(kind);
         }
     }
     pressed
@@ -156,6 +161,6 @@ pub fn resize_edges(ctx: &egui::Context) {
 /// system's frame.
 pub fn outline(ctx: &egui::Context) {
     let colour = ctx.global_style().visuals.widgets.noninteractive.bg_stroke.color;
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window_outline")));
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("window_outline")));
     painter.rect_stroke(ctx.content_rect(), 0.0, Stroke::new(1.0, colour), egui::StrokeKind::Inside);
 }

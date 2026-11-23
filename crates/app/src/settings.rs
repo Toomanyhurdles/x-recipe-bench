@@ -1,5 +1,11 @@
-//! What is remembered between runs. Stored as readable JSON:
-//! Linux `~/.config/x-recipe-bench/settings.json`, Windows `%APPDATA%\x-recipe-bench\`.
+//! What is remembered between runs.
+//!
+//! Storage is `craft-settings` from craft-libs: a readable `config.toml` in
+//! Linux `~/.config/x-recipe-bench/`, Windows `%APPDATA%\x-recipe-bench\`,
+//! saved atomically with a backup, and moved aside (not lost) if damaged.
+//! Setting `X_RECIPE_BENCH_CONFIG_DIR` points it at another folder.
+//! Versions up to 0.18 kept `settings.json` there; it is read once and left in
+//! place, so going back to an older version still works.
 
 use crate::border::Border;
 use crate::orientation::Orientation;
@@ -8,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub last_folder: Option<PathBuf>,
@@ -38,6 +44,9 @@ pub struct Settings {
     pub auto_render: bool,
     pub appearance: Appearance,
     pub dark_mode: bool,
+    /// Let the desktop draw the title bar instead of the app (takes effect
+    /// at the next start).
+    pub system_title_bar: bool,
 }
 
 impl Default for Settings {
@@ -61,18 +70,21 @@ impl Default for Settings {
             auto_render: true,
             appearance: Appearance::UltraModern,
             dark_mode: true,
+            system_title_bar: false,
         }
     }
+}
+
+impl craft_settings::Settings for Settings {
+    const APP_ID: &'static str = crate::APP_ID;
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// The settings folder's name while the app was called X Raw Probe.
 const OLD_APP_ID: &str = "x-raw-probe";
 
-fn config_dir() -> Option<PathBuf> {
-    config_dir_named(crate::APP_ID)
-}
-
-fn config_dir_named(name: &str) -> Option<PathBuf> {
+/// The settings files of versions up to 0.18, newest first.
+fn legacy_files() -> Vec<craft_settings::LegacyFile<Settings>> {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
@@ -81,44 +93,59 @@ fn config_dir_named(name: &str) -> Option<PathBuf> {
             .filter(|p| p.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     };
-    base.map(|b| b.join(name))
+    let Some(base) = base else { return Vec::new() };
+    [crate::APP_ID, OLD_APP_ID]
+        .iter()
+        .map(|name| craft_settings::LegacyFile { path: base.join(name).join("settings.json"), parse: Settings::from_json })
+        .collect()
+}
+
+/// The open settings file. Changes are kept in memory by [`Store::save`] and
+/// written when they differ from what is on disk.
+pub struct Store(craft_settings::SettingsStore<Settings>);
+
+impl Store {
+    /// Opens the settings file, or starts from the defaults (or from an older
+    /// version's `settings.json`) when there is none. Never fails.
+    pub fn open() -> (Store, Vec<String>) {
+        Store::open_at(craft_settings::Location::Auto)
+    }
+
+    pub fn open_at(location: craft_settings::Location) -> (Store, Vec<String>) {
+        let options = craft_settings::OpenOptions::new(location).legacy(legacy_files());
+        let (store, report) = craft_settings::SettingsStore::open_with(options);
+        let notes = report_notes(&report);
+        (Store(store), notes)
+    }
+
+    pub fn get(&self) -> &Settings {
+        self.0.get()
+    }
+
+    /// Remembers `settings` and writes them to disk if they changed.
+    pub fn save(&mut self, settings: Settings) {
+        if self.0.set(settings) || self.0.is_dirty() {
+            let _ = self.0.flush();
+        }
+    }
+}
+
+/// Lines for the Log about anything unusual that happened while loading.
+fn report_notes(report: &craft_settings::LoadReport) -> Vec<String> {
+    let text = format!("{report:?}");
+    // Only mention problems; a normal load says nothing.
+    if text.contains("MovedAside") || text.contains("Damaged") || text.contains("ReadOnly") {
+        vec![format!("Settings: {text}")]
+    } else {
+        Vec::new()
+    }
 }
 
 impl Settings {
-    /// Reads settings from JSON text. Entries this version does not know
-    /// (from older versions) are ignored; missing ones get their defaults.
-    pub fn from_text(text: &str) -> Settings {
-        serde_json::from_str(text).unwrap_or_default()
-    }
-
-    /// The settings as JSON text.
-    pub fn to_text(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
-    }
-
-    pub fn load() -> Self {
-        // Settings saved under the app's old name are carried over once.
-        let text = config_dir()
-            .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
-            .or_else(|| {
-                config_dir_named(OLD_APP_ID).and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
-            });
-        match text {
-            Some(text) => Settings::from_text(&text),
-            None => Settings::default(),
-        }
-    }
-
-    pub fn save(&self) {
-        let Some(dir) = config_dir() else { return };
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        // Write to a temporary file first so a crash cannot leave half a file.
-        let tmp = dir.join("settings.json.tmp");
-        if std::fs::write(&tmp, self.to_text()).is_ok() {
-            let _ = std::fs::rename(tmp, dir.join("settings.json"));
-        }
+    /// Reads a `settings.json` from versions up to 0.18. Entries this version
+    /// does not know are ignored; missing ones get their defaults.
+    pub fn from_json(bytes: &[u8]) -> Result<Settings, String> {
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())
     }
 }
 
@@ -128,14 +155,24 @@ mod tests {
 
     #[test]
     fn settings_survive_saving_and_loading() {
+        let dir = std::env::temp_dir().join(format!("xrb-settings-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let mut settings = Settings::default();
         settings.border = Border { on: true, percent: 7.5, ..Default::default() };
         settings.dark_mode = false;
         settings.photos_place = Some(crate::windows::Place { x: 10.0, y: 20.0, width: 400.0, height: 900.0 });
-        let back = Settings::from_text(&settings.to_text());
+        settings.orientations.insert("/photos/a b.RAF".into(), Orientation::default().rotated_cw());
+        let (mut store, _) = Store::open_at(craft_settings::Location::Dir(dir.clone()));
+        store.save(settings.clone());
+        assert!(dir.join("config.toml").exists());
+
+        let (store, _) = Store::open_at(craft_settings::Location::Dir(dir.clone()));
+        let back = store.get();
         assert_eq!(back.border, settings.border);
         assert!(!back.dark_mode);
         assert_eq!(back.photos_place, settings.photos_place);
+        assert_eq!(back.orientations, settings.orientations);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -144,9 +181,9 @@ mod tests {
         // are ignored; everything else is kept.
         let old = r#"{"last_folder":"/photos","layout_version":6,"layouts":[{"dock":null}],"workspace":"Develop",
             "separate_windows":[{"panel":"Editor"}],"saved_layouts":[],"thumbnail_size":200.0,"dark_mode":false}"#;
-        let settings = Settings::from_text(old);
+        let settings = Settings::from_json(old.as_bytes()).unwrap();
         assert_eq!(settings.last_folder, Some(PathBuf::from("/photos")));
         assert!(!settings.dark_mode);
-        assert!(Settings::from_text("not json").dark_mode);
+        assert!(Settings::from_json(b"not json").is_err());
     }
 }

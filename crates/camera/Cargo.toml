@@ -6,6 +6,9 @@ edition.workspace = true
 
 [dependencies]
 rusb = { version = "0.9", features = ["vendored"] }
+craft-metadata.workspace = true
+craft-raw.workspace = true
+craft-tiff.workspace = true
 
 [build-dependencies]
 cc = "1"

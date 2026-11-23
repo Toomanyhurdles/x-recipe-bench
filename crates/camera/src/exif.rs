@@ -1,16 +1,20 @@
 //! Reading the details a camera writes into a photo (EXIF), including
 //! Fujifilm's own block of settings (the "MakerNote").
 //!
-//! This is a small reader for exactly what X Recipe Bench shows and uses. It
-//! reads the first EXIF block of a JPEG, or of the preview JPEG inside a RAF.
-//! Layout facts follow the EXIF standard and the public notes in
-//! fujifilm-ptp-reference (CC BY 4.0).
+//! The reading itself is done by craft-libs: `craft-metadata` finds the EXIF
+//! block in a JPEG or RAF and reads the standard fields, and `craft-tiff`
+//! parses the Fujifilm MakerNote. This module only turns their results into
+//! the small [`Exif`] record the rest of X Recipe Bench uses, and keeps the
+//! Fujifilm values as plain numbers so recipes can be rebuilt from them.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 
-/// How much of a file is read to find the EXIF block. It sits at the start.
+use craft_tiff::makernote::{parse_makernote, MakerNoteKind};
+use craft_tiff::{Tiff, Value};
+
+/// How much of a file is read to find the EXIF block of a JPEG. It sits at the start.
 const HEAD: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -20,8 +24,8 @@ pub struct Exif {
     pub lens: String,
     /// EXIF orientation, 1..=8. 1 means "as stored".
     pub orientation: u16,
-    /// Shutter time as a fraction of a second: (1, 250) is 1/250 s.
-    pub exposure_time: Option<(u32, u32)>,
+    /// Shutter time in seconds: 0.004 is 1/250 s.
+    pub exposure_time: Option<f64>,
     pub f_number: Option<f64>,
     pub iso: Option<u32>,
     /// Exposure compensation in EV.
@@ -34,239 +38,100 @@ pub struct Exif {
     pub fuji: HashMap<u16, Vec<i64>>,
 }
 
-/// A TIFF structure: byte order plus the bytes offsets are relative to.
-struct Tiff<'a> {
-    data: &'a [u8],
-    little: bool,
-}
-
-struct Entry {
-    tag: u16,
-    kind: u16,
-    count: usize,
-    /// Where the values are, within `data`.
-    at: usize,
-}
-
-impl<'a> Tiff<'a> {
-    fn u16(&self, at: usize) -> Option<u16> {
-        let b: [u8; 2] = self.data.get(at..at + 2)?.try_into().ok()?;
-        Some(if self.little { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
-    }
-    fn u32(&self, at: usize) -> Option<u32> {
-        let b: [u8; 4] = self.data.get(at..at + 4)?.try_into().ok()?;
-        Some(if self.little { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
-    }
-
-    fn entries(&self, ifd: usize) -> Vec<Entry> {
-        let mut out = Vec::new();
-        let Some(count) = self.u16(ifd) else { return out };
-        for i in 0..(count as usize).min(4096) {
-            let at = ifd + 2 + 12 * i;
-            let (Some(tag), Some(kind), Some(n)) = (self.u16(at), self.u16(at + 2), self.u32(at + 4)) else {
-                break;
-            };
-            let size: usize = match kind {
-                1 | 2 | 6 | 7 => 1,
-                3 | 8 => 2,
-                4 | 9 => 4,
-                5 | 10 => 8,
-                _ => continue,
-            };
-            let n = n as usize;
-            let Some(total) = size.checked_mul(n) else { continue };
-            let value_at = if total <= 4 {
-                at + 8
-            } else {
-                match self.u32(at + 8) {
-                    Some(offset) => offset as usize,
-                    None => continue,
-                }
-            };
-            if value_at.checked_add(total).map(|end| end <= self.data.len()).unwrap_or(false) {
-                out.push(Entry { tag, kind, count: n, at: value_at });
-            }
-        }
-        out
-    }
-
-    /// The entry's values as integers (rationals are skipped).
-    fn integers(&self, e: &Entry) -> Vec<i64> {
-        (0..e.count.min(64))
-            .filter_map(|i| match e.kind {
-                1 | 7 => self.data.get(e.at + i).map(|b| *b as i64),
-                6 => self.data.get(e.at + i).map(|b| *b as i8 as i64),
-                3 => self.u16(e.at + 2 * i).map(|v| v as i64),
-                8 => self.u16(e.at + 2 * i).map(|v| v as i16 as i64),
-                4 => self.u32(e.at + 4 * i).map(|v| v as i64),
-                9 => self.u32(e.at + 4 * i).map(|v| v as i32 as i64),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn text(&self, e: &Entry) -> String {
-        let bytes = &self.data[e.at..e.at + e.count];
-        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).trim().to_string()
-    }
-
-    /// A rational as (numerator, denominator); signed for type 10.
-    fn rational(&self, e: &Entry) -> Option<(i64, i64)> {
-        let (n, d) = (self.u32(e.at)?, self.u32(e.at + 4)?);
-        Some(if e.kind == 10 { (n as i32 as i64, d as i32 as i64) } else { (n as i64, d as i64) })
-    }
-
-    fn number(&self, e: &Entry) -> Option<f64> {
-        match e.kind {
-            5 | 10 => self.rational(e).filter(|(_, d)| *d != 0).map(|(n, d)| n as f64 / d as f64),
-            _ => self.integers(e).first().map(|v| *v as f64),
-        }
-    }
-}
-
-/// Finds the EXIF block of a JPEG: (offset of the TIFF data, its length).
-fn find_tiff(jpeg: &[u8]) -> Option<(usize, usize)> {
-    if !jpeg.starts_with(&[0xFF, 0xD8]) {
-        return None;
-    }
-    let mut at = 2;
-    while at + 4 <= jpeg.len() {
-        if jpeg[at] != 0xFF {
-            return None;
-        }
-        let marker = jpeg[at + 1];
-        if marker == 0xDA || marker == 0xD9 {
-            return None; // image data starts; no EXIF before it
-        }
-        let len = u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]) as usize;
-        if len < 2 {
-            return None;
-        }
-        let body = at + 4;
-        let end = (at + 2 + len).min(jpeg.len());
-        if marker == 0xE1 && jpeg.get(body..body + 6) == Some(b"Exif\0\0") {
-            return Some((body + 6, end.saturating_sub(body + 6)));
-        }
-        at += 2 + len;
-    }
-    None
-}
-
-fn open_tiff(data: &[u8]) -> Option<(Tiff<'_>, usize)> {
-    let little = match data.get(0..2)? {
-        b"II" => true,
-        b"MM" => false,
-        _ => return None,
-    };
-    let tiff = Tiff { data, little };
-    if tiff.u16(2)? != 42 {
-        return None;
-    }
-    let ifd0 = tiff.u32(4)? as usize;
-    Some((tiff, ifd0))
+/// A shutter time as people write it: "1/250 s", "2.5 s".
+pub fn shutter_label(seconds: f64) -> String {
+    craft_metadata::format_exposure_time(seconds).map(|t| format!("{t} s")).unwrap_or_default()
 }
 
 /// Reads the EXIF block from the start of a JPEG. `None` if there is none.
 pub fn parse_jpeg(jpeg: &[u8]) -> Option<Exif> {
-    let (start, len) = find_tiff(jpeg)?;
-    let (tiff, ifd0) = open_tiff(&jpeg[start..start + len])?;
-    let mut exif = Exif { orientation: 1, ..Default::default() };
-    let mut exif_ifd = None;
-
-    for e in tiff.entries(ifd0) {
-        match e.tag {
-            0x010F => exif.make = tiff.text(&e),
-            0x0110 => exif.model = tiff.text(&e),
-            0x0112 => {
-                let v = tiff.integers(&e).first().copied().unwrap_or(1);
-                exif.orientation = if (1..=8).contains(&v) { v as u16 } else { 1 };
-            }
-            0x8769 => exif_ifd = tiff.integers(&e).first().map(|v| *v as usize),
-            _ => {}
-        }
+    if !jpeg.starts_with(&[0xFF, 0xD8]) {
+        return None;
     }
-    for e in exif_ifd.map(|ifd| tiff.entries(ifd)).unwrap_or_default() {
-        match e.tag {
-            0x829A => {
-                exif.exposure_time =
-                    tiff.rational(&e).filter(|(n, d)| *n > 0 && *d > 0).map(|(n, d)| (n as u32, d as u32))
-            }
-            0x829D => exif.f_number = tiff.number(&e),
-            0x8827 => exif.iso = tiff.integers(&e).first().map(|v| *v as u32),
-            0x9003 => exif.date_time = Some(tiff.text(&e)).filter(|t| !t.is_empty()),
-            0x9204 => exif.exposure_bias = tiff.number(&e),
-            0x920A => exif.focal_length = tiff.number(&e),
-            0xA434 => exif.lens = tiff.text(&e),
-            0x927C => exif.fuji = fuji_maker_note(&tiff.data[e.at..e.at + e.count]),
-            _ => {}
-        }
-    }
-    Some(exif)
+    from_block(&craft_metadata::jpeg_segments(jpeg).exif?)
 }
 
-/// Fujifilm's block: "FUJIFILM", a little-endian offset, then a directory
-/// whose offsets are relative to the start of the block.
-fn fuji_maker_note(note: &[u8]) -> HashMap<u16, Vec<i64>> {
-    let mut tags = HashMap::new();
-    if !note.starts_with(b"FUJIFILM") {
-        return tags;
+/// Reads a TIFF-structured EXIF block (as found inside a JPEG's APP1 segment).
+fn from_block(block: &[u8]) -> Option<Exif> {
+    let data = craft_metadata::strip_exif_header(block);
+    // A block that is not a readable TIFF structure counts as no EXIF at all.
+    let tiff = Tiff::parse(data).ok()?;
+    let ifd0 = tiff.ifds.first()?;
+    let m = craft_metadata::read_exif(data);
+
+    let date_time = ifd0.exif.as_ref().and_then(|e| e.string(0x9003)).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let fuji = ifd0
+        .exif
+        .as_ref()
+        .and_then(|e| e.get(0x927C))
+        .and_then(|note| parse_makernote(data, note.offset, note.count() as u64, tiff.order, m.make.as_deref().unwrap_or("")))
+        .filter(|note| note.kind == MakerNoteKind::Fujifilm)
+        .map(|note| note.ifd.entries.iter().filter_map(|e| Some((e.tag, integers(&e.value)?))).collect())
+        .unwrap_or_default();
+
+    Some(Exif {
+        make: m.make.unwrap_or_default().trim().to_string(),
+        model: m.model.unwrap_or_default().trim().to_string(),
+        lens: m.lens_model.unwrap_or_default().trim().to_string(),
+        orientation: m.orientation.map(|o| o.to_exif()).unwrap_or(1),
+        exposure_time: m.exposure_time.filter(|t| *t > 0.0),
+        f_number: m.f_number,
+        iso: m.iso,
+        exposure_bias: m.exposure_bias,
+        focal_length: m.focal_length,
+        date_time,
+        fuji,
+    })
+}
+
+/// A MakerNote value as whole numbers (at most 64 of them). Text, fractions and
+/// empty values give `None`: no recipe setting is stored that way.
+fn integers(value: &Value) -> Option<Vec<i64>> {
+    if matches!(value, Value::Ascii(_) | Value::Rational(_) | Value::SRational(_) | Value::Float(_) | Value::Double(_)) {
+        return None;
     }
-    let tiff = Tiff { data: note, little: true };
-    let Some(ifd) = tiff.u32(8) else { return tags };
-    for e in tiff.entries(ifd as usize) {
-        let values = tiff.integers(&e);
-        if !values.is_empty() {
-            tags.entry(e.tag).or_insert(values);
-        }
-    }
-    tags
+    let n = value.count().min(64);
+    let values: Vec<i64> = (0..n).filter_map(|i| value.get_i64(i)).collect();
+    (!values.is_empty()).then_some(values)
 }
 
 /// Reads the details of a photo file: a JPEG, or a RAF (via its preview JPEG).
 pub fn read_file(path: &Path) -> std::io::Result<Option<Exif>> {
-    let mut file = std::fs::File::open(path)?;
-    let mut start = [0u8; 2];
-    if file.read_exact(&mut start).is_err() {
-        return Ok(None);
+    let mut start = Vec::new();
+    std::fs::File::open(path)?.take(HEAD).read_to_end(&mut start)?;
+    if start.starts_with(&[0xFF, 0xD8]) {
+        return Ok(parse_jpeg(&start));
     }
-    let offset = if start == [0xFF, 0xD8] {
-        0
-    } else {
-        match crate::raf::read_header(path)? {
-            Some(h) if h.jpeg_len > 0 => h.jpeg_offset,
-            _ => return Ok(None),
-        }
-    };
-    file.seek(SeekFrom::Start(offset))?;
-    let mut head = Vec::new();
-    file.take(HEAD).read_to_end(&mut head)?;
-    Ok(parse_jpeg(&head))
+    if crate::raf::is_raf(&start) {
+        return Ok(crate::raf::read_embedded_jpeg(path)?.and_then(|jpeg| parse_jpeg(&jpeg)));
+    }
+    Ok(None)
+}
+
+/// `original`'s EXIF block, with the orientation set to "as stored" because the
+/// pixels have already been turned upright, ready to go into a new JPEG as an
+/// APP1 segment: `(0xE1, "Exif\0\0" + block)`. `None` if it has no EXIF block.
+pub fn upright_segment(original: &[u8]) -> Option<(u8, Vec<u8>)> {
+    let block = craft_metadata::jpeg_segments(original).exif?;
+    let upright = craft_metadata::edit::upright_exif(&block);
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&upright);
+    // One JPEG segment holds at most 65533 bytes of payload.
+    (payload.len() <= 0xFFFF - 2).then_some((0xE1, payload))
 }
 
 /// Puts `original`'s EXIF block into `reencoded`, with the orientation set
 /// to "as stored" because the pixels have already been turned upright.
 /// Returns `reencoded` unchanged if the original has no EXIF block.
 pub fn carry_over_upright(original: &[u8], reencoded: &[u8]) -> Vec<u8> {
-    let Some((start, len)) = find_tiff(original) else { return reencoded.to_vec() };
-    if !reencoded.starts_with(&[0xFF, 0xD8]) || len + 8 > 0xFFFF {
+    let Some((marker, payload)) = upright_segment(original) else { return reencoded.to_vec() };
+    if !reencoded.starts_with(&[0xFF, 0xD8]) {
         return reencoded.to_vec();
     }
-    let mut tiff_bytes = original[start..start + len].to_vec();
-    // Find the orientation entry in the first directory and set it to 1.
-    let orientation_at = open_tiff(&tiff_bytes).and_then(|(tiff, ifd0)| {
-        tiff.entries(ifd0).into_iter().find(|e| e.tag == 0x0112 && e.kind == 3).map(|e| (e.at, tiff.little))
-    });
-    if let Some((at, little)) = orientation_at {
-        let one = if little { 1u16.to_le_bytes() } else { 1u16.to_be_bytes() };
-        tiff_bytes[at..at + 2].copy_from_slice(&one);
-    }
-
-    let mut out = Vec::with_capacity(reencoded.len() + tiff_bytes.len() + 10);
-    out.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xE1]);
-    out.extend_from_slice(&((tiff_bytes.len() + 8) as u16).to_be_bytes());
-    out.extend_from_slice(b"Exif\0\0");
-    out.extend_from_slice(&tiff_bytes);
+    let mut out = Vec::with_capacity(reencoded.len() + payload.len() + 4);
+    out.extend_from_slice(&[0xFF, 0xD8, 0xFF, marker]);
+    out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&payload);
     out.extend_from_slice(&reencoded[2..]);
     out
 }
@@ -385,7 +250,8 @@ mod tests {
         assert_eq!((exif.make.as_str(), exif.model.as_str()), ("FUJIFILM", "X-T4"));
         assert_eq!(exif.lens, "XF23mmF2 R WR");
         assert_eq!(exif.orientation, 6);
-        assert_eq!(exif.exposure_time, Some((1, 250)));
+        assert!((exif.exposure_time.unwrap() - 0.004).abs() < 1e-9);
+        assert_eq!(shutter_label(exif.exposure_time.unwrap()), "1/250 s");
         assert_eq!(exif.f_number, Some(2.8));
         assert_eq!(exif.iso, Some(640));
         assert!((exif.exposure_bias.unwrap() + 0.6667).abs() < 0.001);

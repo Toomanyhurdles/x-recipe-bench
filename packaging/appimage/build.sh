@@ -12,6 +12,8 @@ APPDIR=target/appimage/AppDir
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
 cp target/release/x-recipe-bench "$APPDIR/usr/bin/"
+mkdir -p "$APPDIR/usr/share/doc/x-recipe-bench"
+cp LICENSE licenses/*.txt "$APPDIR/usr/share/doc/x-recipe-bench/"
 cp packaging/appimage/x-recipe-bench.desktop packaging/appimage/x-recipe-bench.png "$APPDIR/"
 cat > "$APPDIR/AppRun" <<'RUN'
 #!/bin/sh

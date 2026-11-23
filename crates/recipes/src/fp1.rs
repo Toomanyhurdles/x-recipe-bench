@@ -44,36 +44,30 @@ pub struct Recipe {
 impl Recipe {
     pub fn parse(text: &str) -> Result<Recipe, String> {
         let text = text.trim_start_matches('\u{feff}');
-        let doc = roxmltree::Document::parse(text)
-            .map_err(|e| format!("not a readable recipe file ({e})"))?;
-        let root = doc.root_element();
-        if root.tag_name().name() != "ConversionProfile" {
+        // craft-xml reads the file. Comments are kept: the description lives in one.
+        let options = craft_xml::Options { comments: true, ..Default::default() };
+        let root = options.parse(text.as_bytes()).map_err(|e| format!("not a readable recipe file ({e})"))?;
+        if root.local() != "ConversionProfile" {
             return Err("not an FP1 recipe (no ConversionProfile)".into());
         }
-        let group = root
-            .children()
-            .find(|n| n.has_tag_name("PropertyGroup"))
-            .ok_or("not an FP1 recipe (no PropertyGroup)")?;
+        let group = root.child("PropertyGroup").ok_or("not an FP1 recipe (no PropertyGroup)")?;
 
-        let fields = group
-            .children()
-            .filter(|n| n.is_element())
-            .map(|n| {
-                (n.tag_name().name().to_string(), n.text().unwrap_or("").trim().to_string())
+        let fields = group.elements().map(|n| (n.local().to_string(), n.text().trim().to_string())).collect();
+
+        let description = root
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                craft_xml::Node::Comment(c) => Some(c.as_str()),
+                _ => None,
             })
-            .collect();
-
-        let description = doc
-            .descendants()
-            .filter(|n| n.is_comment())
-            .filter_map(|n| n.text())
             .find_map(|t| description_in(t).map(decode_comment))
             .unwrap_or_default();
 
         Ok(Recipe {
-            name: group.attribute("label").unwrap_or("").to_string(),
-            device: group.attribute("device").unwrap_or("").to_string(),
-            device_version: group.attribute("version").unwrap_or("").to_string(),
+            name: group.attr("label").unwrap_or("").to_string(),
+            device: group.attr("device").unwrap_or("").to_string(),
+            device_version: group.attr("version").unwrap_or("").to_string(),
             description,
             fields,
             source: text.to_string(),
@@ -191,8 +185,9 @@ fn decode_comment(text: &str) -> String {
     text.trim().replace('\u{200b}', "")
 }
 
+/// Text made safe to put inside an element or an attribute (craft-xml's escaping).
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    craft_xml::esc_attr(text)
 }
 
 #[cfg(test)]

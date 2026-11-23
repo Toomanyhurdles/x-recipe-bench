@@ -58,7 +58,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     let rows = files.len().div_ceil(columns);
     let mut clicked = None;
 
-    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+    egui::ScrollArea::vertical().id_salt("photos_scroll").auto_shrink(false).show_rows(
         ui,
         cell.y + GAP.y,
         rows,

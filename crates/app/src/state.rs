@@ -4,6 +4,7 @@ use crate::camera_worker::{CameraCommand, RecipeJob};
 use crate::events::{EmbeddedKind, EventSender, PreviewKey};
 use crate::image_worker::ImageRequest;
 use eframe::egui::TextureHandle;
+use craft_dialogs::FileDialog;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -264,6 +265,19 @@ pub struct AppState {
     pub camera_tx: Sender<CameraCommand>,
     pub image_tx: Sender<ImageRequest>,
     pub events: EventSender,
+    /// File and folder dialogs (craft-dialogs): asked for here, shown by the
+    /// app at the end of a frame, answered on a later frame.
+    pub dialogs: craft_dialogs::Dialogs<Asked>,
+}
+
+/// What a file dialog was asked for, so its answer goes to the right place.
+pub enum Asked {
+    PhotoFolder,
+    RecipesToImport,
+    PhotosForRecipes,
+    RecipeExportFolder,
+    BatchFolder,
+    ExportDest { raf: PathBuf, recipe: Option<crate::camera_worker::RecipeJob>, finish: crate::export::Finish },
 }
 
 impl AppState {
@@ -604,53 +618,27 @@ impl AppState {
     }
 
     /// Asks which recipe files to import. Several can be chosen at once.
-    pub fn pick_recipes_to_import(&self) {
-        let events = self.events.clone();
-        std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Import recipe files")
-                .add_filter("X RAW Studio recipes", &["FP1", "fp1"])
-                .pick_files();
-            if let Some(files) = picked {
-                events.send(crate::events::AppEvent::RecipesPicked(files));
-            }
-        });
+    pub fn pick_recipes_to_import(&mut self) {
+        let dialog = FileDialog::open_many().title("Import recipe files").filter("X RAW Studio recipes", &["FP1", "fp1"]);
+        self.dialogs.ask(dialog, Asked::RecipesToImport);
     }
 
     /// Asks for a folder; every recipe file in it, at any depth, is imported.
-    pub fn pick_recipe_folder_to_import(&self) {
-        let events = self.events.clone();
-        std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new().set_title("Import a folder of recipes").pick_folder();
-            if let Some(folder) = picked {
-                events.send(crate::events::AppEvent::RecipesPicked(vec![folder]));
-            }
-        });
+    pub fn pick_recipe_folder_to_import(&mut self) {
+        self.dialogs.ask(FileDialog::folder().title("Import a folder of recipes"), Asked::RecipesToImport);
     }
 
     /// Asks which photos to read recipes from.
-    pub fn pick_photos_for_recipes(&self) {
-        let events = self.events.clone();
-        std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Make recipes from Fujifilm photos")
-                .add_filter("Fujifilm photos", &["JPG", "jpg", "JPEG", "jpeg", "RAF", "raf"])
-                .pick_files();
-            if let Some(files) = picked {
-                events.send(crate::events::AppEvent::PhotosPickedForRecipes(files));
-            }
-        });
+    pub fn pick_photos_for_recipes(&mut self) {
+        let dialog = FileDialog::open_many()
+            .title("Make recipes from Fujifilm photos")
+            .filter("Fujifilm photos", &["JPG", "jpg", "JPEG", "jpeg", "RAF", "raf"]);
+        self.dialogs.ask(dialog, Asked::PhotosForRecipes);
     }
 
     /// Asks where to copy the ticked recipes to.
-    pub fn pick_recipe_export_folder(&self) {
-        let events = self.events.clone();
-        std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new().set_title("Copy the selected recipes to a folder").pick_folder();
-            if let Some(folder) = picked {
-                events.send(crate::events::AppEvent::RecipeExportFolderPicked(folder));
-            }
-        });
+    pub fn pick_recipe_export_folder(&mut self) {
+        self.dialogs.ask(FileDialog::folder().title("Copy the selected recipes to a folder"), Asked::RecipeExportFolder);
     }
 
     /// Makes a recipe from each photo's recorded look.
@@ -821,23 +809,17 @@ impl AppState {
         }
     }
 
-    pub fn pick_batch_folder(&self) {
-        let events = self.events.clone();
-        let start = self.folder.clone();
+    pub fn pick_batch_folder(&mut self) {
         // For automated tests, which cannot work a folder dialog.
         if let Some(dest) = std::env::var_os("XRP_BATCH_DEST") {
-            events.send(crate::events::AppEvent::BatchFolderPicked(PathBuf::from(dest)));
+            self.events.send(crate::events::AppEvent::BatchFolderPicked(PathBuf::from(dest)));
             return;
         }
-        std::thread::spawn(move || {
-            let mut dialog = rfd::FileDialog::new().set_title("Folder for the exported JPEGs");
-            if let Some(dir) = start {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(dest) = dialog.pick_folder() {
-                events.send(crate::events::AppEvent::BatchFolderPicked(dest));
-            }
-        });
+        let mut dialog = FileDialog::folder().title("Folder for the exported JPEGs");
+        if let Some(dir) = &self.folder {
+            dialog = dialog.directory(dir);
+        }
+        self.dialogs.ask(dialog, Asked::BatchFolder);
     }
 
     /// Queues one export per photo and look into `dest`. Files already
@@ -877,36 +859,44 @@ impl AppState {
         let Some(raf) = self.selected.clone() else { return };
         let recipe = self.active_job();
         let finish = self.finish_for(&raf);
-        let options = self.export.clone();
-        let events = self.events.clone();
-        // File dialogs block, so they run on their own thread.
-        std::thread::spawn(move || {
-            let stem = raf.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "export".into());
-            let name = options.file_name(&stem, recipe.as_ref().map(|j| j.name.as_str()));
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Export full-size JPEG")
-                .set_file_name(name)
-                .add_filter("JPEG", &["jpg", "jpeg"]);
-            if let Some(dir) = raf.parent() {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(dest) = dialog.save_file() {
-                events.send(crate::events::AppEvent::ExportDestPicked { raf, recipe, dest, finish });
-            }
-        });
+        let stem = raf.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "export".into());
+        let name = self.export.file_name(&stem, recipe.as_ref().map(|j| j.name.as_str()));
+        let mut dialog = FileDialog::save().title("Export full-size JPEG").file_name(name).filter("JPEG", &["jpg", "jpeg"]);
+        if let Some(dir) = raf.parent() {
+            dialog = dialog.directory(dir);
+        }
+        self.dialogs.ask(dialog, Asked::ExportDest { raf, recipe, finish });
     }
 
-    pub fn pick_folder(&self) {
-        let events = self.events.clone();
-        let start = self.folder.clone();
-        std::thread::spawn(move || {
-            let mut dialog = rfd::FileDialog::new().set_title("Open a folder of RAF files");
-            if let Some(dir) = start {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(folder) = dialog.pick_folder() {
-                events.send(crate::events::AppEvent::FolderPicked(folder));
-            }
-        });
+    pub fn pick_folder(&mut self) {
+        let mut dialog = FileDialog::folder().title("Open a folder of RAF files");
+        if let Some(dir) = &self.folder {
+            dialog = dialog.directory(dir);
+        }
+        self.dialogs.ask(dialog, Asked::PhotoFolder);
+    }
+
+    /// Turns the answers of file dialogs that closed into the app's events.
+    pub fn collect_dialog_answers(&mut self) {
+        for (asked, answer) in self.dialogs.take_answers() {
+            let paths = match answer {
+                craft_dialogs::Answer::Paths(paths) if !paths.is_empty() => paths,
+                craft_dialogs::Answer::Unavailable(why) => {
+                    self.log(format!("The file dialog could not be shown: {why}"));
+                    continue;
+                }
+                _ => continue,
+            };
+            let first = paths[0].clone();
+            use crate::events::AppEvent as E;
+            self.events.send(match asked {
+                Asked::PhotoFolder => E::FolderPicked(first),
+                Asked::RecipesToImport => E::RecipesPicked(paths),
+                Asked::PhotosForRecipes => E::PhotosPickedForRecipes(paths),
+                Asked::RecipeExportFolder => E::RecipeExportFolderPicked(first),
+                Asked::BatchFolder => E::BatchFolderPicked(first),
+                Asked::ExportDest { raf, recipe, finish } => E::ExportDestPicked { raf, recipe, dest: first, finish },
+            });
+        }
     }
 }

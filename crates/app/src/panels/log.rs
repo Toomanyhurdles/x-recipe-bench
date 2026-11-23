@@ -13,7 +13,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         }
     });
     ui.separator();
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::vertical().id_salt("log_scroll")
         .auto_shrink(false)
         .stick_to_bottom(true)
         .show(ui, |ui| {

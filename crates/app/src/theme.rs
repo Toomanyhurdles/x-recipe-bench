@@ -338,36 +338,29 @@ pub fn style(appearance: Appearance, dark: bool) -> egui::Style {
         Some(_) => Stroke::new(1.0, colour),
         None => Stroke::new(1.0, faint_edge),
     };
+    // Fills, corners and text for each state (craft-ui's WidgetPalette), then
+    // the per-state edges and text weights this app uses on top.
+    craft_ui::theme::WidgetPalette {
+        noninteractive: r.panel,
+        inactive: r.button,
+        hovered: r.button_hovered,
+        active: r.button_pressed,
+        open: r.button_pressed,
+    }
+    .apply_to(&mut v.widgets, radius, Stroke::new(1.0, r.text));
     // Things that are not controls: labels, separators, frames.
-    v.widgets.noninteractive.bg_fill = r.panel;
-    v.widgets.noninteractive.weak_bg_fill = r.panel;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, r.divider);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, r.text);
-    v.widgets.noninteractive.corner_radius = radius;
     // Controls at rest.
-    v.widgets.inactive.bg_fill = r.button;
-    v.widgets.inactive.weak_bg_fill = r.button;
     v.widgets.inactive.bg_stroke = outline(r.outline.unwrap_or(r.divider));
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, r.text);
-    v.widgets.inactive.corner_radius = radius;
     // Under the mouse.
-    v.widgets.hovered.bg_fill = r.button_hovered;
-    v.widgets.hovered.weak_bg_fill = r.button_hovered;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, r.accent);
     v.widgets.hovered.fg_stroke = Stroke::new(1.5, r.strong_text);
-    v.widgets.hovered.corner_radius = radius;
     // Being pressed.
-    v.widgets.active.bg_fill = r.button_pressed;
-    v.widgets.active.weak_bg_fill = r.button_pressed;
     v.widgets.active.bg_stroke = Stroke::new(1.0, r.accent);
     v.widgets.active.fg_stroke = Stroke::new(2.0, r.strong_text);
-    v.widgets.active.corner_radius = radius;
     // An open menu or dropdown.
-    v.widgets.open.bg_fill = r.button_pressed;
-    v.widgets.open.weak_bg_fill = r.button_pressed;
     v.widgets.open.bg_stroke = Stroke::new(1.0, r.accent);
     v.widgets.open.fg_stroke = Stroke::new(1.0, r.strong_text);
-    v.widgets.open.corner_radius = radius;
     style.visuals = v;
 
     style.spacing.item_spacing = r.item_spacing;

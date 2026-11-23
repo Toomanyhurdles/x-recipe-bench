@@ -6,4 +6,5 @@ edition.workspace = true
 
 [dependencies]
 xrp-camera = { path = "../camera" }
-roxmltree = "0.20"
+craft-xml.workspace = true
+craft-atomic.workspace = true

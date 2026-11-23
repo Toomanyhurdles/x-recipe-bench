@@ -14,7 +14,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     let stars = state.stars_of(raf);
     let mut new_stars = None;
 
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("info_scroll").auto_shrink(false).show(ui, |ui| {
         let name = raf.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         ui.strong(&name);
         if let Some(stars) = super::crop::stars_row(ui, stars) {
@@ -33,9 +33,8 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             if let Some(mm) = exif.focal_length {
                 shooting.push(("Focal length", format!("{} mm", trim_number(mm))));
             }
-            if let Some((n, d)) = exif.exposure_time {
-                let text = if n >= d { format!("{} s", trim_number(n as f64 / d as f64)) } else { format!("1/{} s", (d as f64 / n as f64).round()) };
-                shooting.push(("Shutter", text));
+            if let Some(seconds) = exif.exposure_time {
+                shooting.push(("Shutter", xrp_camera::exif::shutter_label(seconds)));
             }
             if let Some(f) = exif.f_number {
                 shooting.push(("Aperture", format!("f/{}", trim_number(f))));

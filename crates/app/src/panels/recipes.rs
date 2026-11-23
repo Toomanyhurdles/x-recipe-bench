@@ -189,7 +189,7 @@ fn recipe_list(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
         .filter(|r| search.is_empty() || r.display_name().to_lowercase().contains(&search))
         .collect();
 
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("recipes_scroll").auto_shrink(false).show(ui, |ui| {
         let as_shot = state.recipes.active.is_none() && state.editor.settings.is_empty();
         if ui
             .selectable_label(as_shot, "Original (no recipe)")
@@ -253,7 +253,7 @@ fn recipe_list(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
             let width = CARD_WIDTH + 24.0;
             let x = (panel_left - width - 10.0).max(screen.left() + 4.0);
             let y = row.top().min(screen.bottom() - 470.0).max(screen.top() + 30.0);
-            egui::Area::new(egui::Id::new("recipe_card"))
+            egui::Area::new(egui::Id::unique("recipe_card"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(egui::pos2(x, y))
                 .interactable(false)

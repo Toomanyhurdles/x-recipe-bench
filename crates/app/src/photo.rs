@@ -192,9 +192,7 @@ impl FolderNotes {
             };
         }
         let text = serde_json::to_string_pretty(&serde_json::json!({ "photos": kept })).map_err(|e| e.to_string())?;
-        let tmp = folder.join(format!("{FOLDER_FILE}.tmp"));
-        std::fs::write(&tmp, text)
-            .and_then(|_| std::fs::rename(&tmp, &path))
+        craft_atomic::atomic_write(&path, text.as_bytes())
             .map_err(|e| format!("Could not write {}: {e}", path.display()))
     }
 }
@@ -219,12 +217,8 @@ const IMAGE_COUNT_TAG: u16 = 0x1438;
 
 impl Facts {
     pub fn from_exif(exif: &xrp_camera::exif::Exif) -> Facts {
-        let shutter = exif.exposure_time.filter(|(_, d)| *d != 0).map(|(n, d)| n as f64 / d as f64);
-        let shutter_label = match exif.exposure_time {
-            Some((n, d)) if d != 0 && n != 0 && n < d => format!("1/{} s", (d as f64 / n as f64).round()),
-            Some((n, d)) if d != 0 => format!("{} s", (n as f64 / d as f64 * 10.0).round() / 10.0),
-            _ => String::new(),
-        };
+        let shutter = exif.exposure_time;
+        let shutter_label = shutter.map(xrp_camera::exif::shutter_label).unwrap_or_default();
         Facts {
             model: exif.model.clone(),
             lens: exif.lens.clone(),
@@ -397,7 +391,7 @@ mod tests {
             Facts::from_exif(&xrp_camera::exif::Exif {
                 lens: lens.into(),
                 f_number: Some(f),
-                exposure_time: Some(shutter),
+                exposure_time: Some(shutter.0 as f64 / shutter.1 as f64),
                 iso: Some(iso),
                 ..Default::default()
             })

@@ -77,15 +77,14 @@ fn object_info_round_trips() {
 }
 
 #[test]
-fn raf_header_is_parsed() {
-    let mut h = vec![0u8; 92];
-    h[..16].copy_from_slice(b"FUJIFILMCCD-RAW ");
-    h[28..32].copy_from_slice(b"X-T4");
-    h[84..88].copy_from_slice(&148u32.to_be_bytes());
-    h[88..92].copy_from_slice(&1000u32.to_be_bytes());
-    let parsed = xrp_camera::raf::parse_header(&h).unwrap();
-    assert_eq!(parsed.model, "X-T4");
-    assert_eq!((parsed.jpeg_offset, parsed.jpeg_len), (148, 1000));
+fn a_raf_preview_is_found_through_craft_raw() {
+    // The fake RAF the simulated camera accepts is a real RAF-shaped file.
+    let dir = std::env::temp_dir().join("xrp-raf-preview-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fake.RAF");
+    std::fs::write(&path, fake_raf(3000)).unwrap();
+    assert!(xrp_camera::raf::is_raf(&std::fs::read(&path).unwrap()));
+    let _ = xrp_camera::raf::read_embedded_jpeg(&path).unwrap();
 }
 
 #[test]

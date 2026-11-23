@@ -218,7 +218,7 @@ fn copy(ui: &mut Ui, state: &AppState, index: usize, cell: Rect) -> Touch {
     let mut touch = Touch::default();
     let Some(key) = state.key_of(index) else { return touch };
     let orientation = state.orientation_of(&key.raf);
-    let response = ui.interact(cell, ui.id().with(("copy", index)), Sense::click_and_drag());
+    let response = ui.interact(cell, egui::Id::unique("preview_copy").with(index), Sense::click_and_drag());
     let picture = cell.shrink(6.0);
     let view = View { zoom: state.zoom, pan: state.pan };
     let crop = state.crop_of(&key.raf);
